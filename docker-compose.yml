@@ -91,6 +91,10 @@ services:
     hostname: taskmanager
     environment:
       JOB_MANAGER_RPC_ADDRESS: jobmanager
+      AWS_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_EC2_METADATA_DISABLED: "true"
     command: taskmanager
     depends_on:
       jobmanager:

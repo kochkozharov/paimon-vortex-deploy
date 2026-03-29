@@ -24,6 +24,9 @@ sql-gateway.endpoint.rest.port: 8083
 # Target cluster for SQL Gateway job submission
 execution.target: remote
 
+# ── Arrow / Vortex: required JVM opens for Java 17+ ──────────────────────────
+env.java.opts.taskmanager: "--add-opens=java.base/java.nio=ALL-UNNAMED"
+
 # ── Checkpointing (required for Paimon to commit data) ───────────────────────
 execution.checkpointing.interval: 10s
 execution.checkpointing.mode: EXACTLY_ONCE

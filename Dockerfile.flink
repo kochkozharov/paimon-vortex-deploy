@@ -71,6 +71,7 @@ RUN --mount=type=cache,target=/root/.m2/repository \
         -Dmaven.repo.local=/root/.m2/repository \
     && cp paimon-vortex/paimon-vortex-format/target/paimon-vortex-format-1.4.0.jar /vortex-libs/ \
     && cp paimon-vortex/paimon-vortex-jni/target/paimon-vortex-jni-1.4.0.jar /vortex-libs/ \
+    && cp paimon-arrow/target/paimon-arrow-1.4.0.jar /vortex-libs/ \
     && ls -lh /vortex-libs/
 
 # Also grab hadoop jar via Maven (guaranteed network — Maven cache already warm)
