@@ -1,30 +1,79 @@
 # syntax=docker/dockerfile:1
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 1 — Build Apache Paimon from the submodule source
+# Stage 1 — Build Vortex native JNI library (Rust)
 # ─────────────────────────────────────────────────────────────────────────────
-FROM maven:3.9-eclipse-temurin-17 AS paimon-builder
+FROM rust:1.94 AS vortex-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /vortex
+COPY vortex/ .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/vortex/target \
+    cargo build --package vortex-jni --release \
+    && cp target/release/libvortex_jni.so /libvortex_jni.so
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 — Build Apache Paimon (Flink connector + Vortex format)
+# ─────────────────────────────────────────────────────────────────────────────
+FROM maven:3.9.9-eclipse-temurin-17 AS paimon-builder
 
 WORKDIR /build
 COPY paimon/ .
 
-# Build the Flink 2.1 connector + its transitive deps.
-# -Pflink2 activates the flink2 profile (module is NOT in the default reactor).
+# Place the native library where Maven will package it into the JNI jar.
+# Detect arch at build time (linux/amd64 or linux/aarch64).
+RUN ARCH=$(uname -m) \
+    && case "$ARCH" in \
+         x86_64)  NATIVE_DIR="linux-amd64" ;; \
+         aarch64) NATIVE_DIR="linux-aarch64" ;; \
+         *)       echo "Unsupported arch: $ARCH"; exit 1 ;; \
+       esac \
+    && mkdir -p paimon-vortex/paimon-vortex-jni/src/main/resources/native/$NATIVE_DIR \
+    && echo "Native dir: $NATIVE_DIR"
+
+COPY --from=vortex-builder /libvortex_jni.so /tmp/libvortex_jni.so
+RUN ARCH=$(uname -m) \
+    && case "$ARCH" in \
+         x86_64)  NATIVE_DIR="linux-amd64" ;; \
+         aarch64) NATIVE_DIR="linux-aarch64" ;; \
+       esac \
+    && cp /tmp/libvortex_jni.so \
+       paimon-vortex/paimon-vortex-jni/src/main/resources/native/$NATIVE_DIR/libvortex_jni.so \
+    && echo "Copied to native/$NATIVE_DIR/"
+
+# Build Flink 2.1 connector + Vortex format and all their transitive deps.
+# -Pflink2 activates paimon-flink-2.1; paimon-vortex modules are in root <modules>.
 RUN --mount=type=cache,target=/root/.m2/repository \
-    mvn clean package -DskipTests --no-transfer-progress \
+    mvn clean install -DskipTests --no-transfer-progress \
         -Pflink2 \
-        -pl paimon-flink/paimon-flink-2.1 --also-make \
+        -pl paimon-flink/paimon-flink-2.2,paimon-vortex/paimon-vortex-format \
+        --also-make \
         -Dmaven.repo.local=/root/.m2/repository
 
-# Stage the connector jar to a fixed path.
-RUN JAR=$(find /build/paimon-flink/paimon-flink-2.1/target \
-              -maxdepth 1 -name "paimon-flink-*.jar") \
-    && echo "==> Paimon Flink jar: $JAR ($(du -h "$JAR" | cut -f1))" \
-    && cp "$JAR" /paimon-flink.jar
+# Stage the Flink connector fat jar
+RUN cp paimon-flink/paimon-flink-2.2/target/paimon-flink-2.2-1.4.0.jar /paimon-flink.jar \
+    && ls -lh /paimon-flink.jar
 
-# Paimon requires Hadoop classes (marked 'provided' in its POM).
-# Flink 2.x does not bundle Hadoop, so download the pre-bundled shaded jar
-# via Maven (guaranteed network — it already fetched paimon deps above).
+# Stage vortex-format + its runtime deps (vortex-jni, arrow libs, protobuf…)
+# These are NOT shaded into paimon-flink.jar so they must be separate jars in lib/.
+RUN --mount=type=cache,target=/root/.m2/repository \
+    mvn dependency:copy-dependencies \
+        -pl paimon-vortex/paimon-vortex-format \
+        --no-transfer-progress \
+        -DoutputDirectory=/vortex-libs \
+        -DincludeScope=runtime \
+        -DexcludeGroupIds=org.apache.paimon \
+        -Dmaven.repo.local=/root/.m2/repository \
+    && cp paimon-vortex/paimon-vortex-format/target/paimon-vortex-format-1.4.0.jar /vortex-libs/ \
+    && cp paimon-vortex/paimon-vortex-jni/target/paimon-vortex-jni-1.4.0.jar /vortex-libs/ \
+    && ls -lh /vortex-libs/
+
+# Also grab hadoop jar via Maven (guaranteed network — Maven cache already warm)
 RUN --mount=type=cache,target=/root/.m2/repository \
     mvn dependency:copy \
         -Dartifact=org.apache.flink:flink-shaded-hadoop-2-uber:2.8.3-10.0 \
@@ -34,27 +83,29 @@ RUN --mount=type=cache,target=/root/.m2/repository \
     && ls -lh /hadoop/
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 2 — Flink 2.1 with S3 plugin + Paimon connector + Hadoop
+# Stage 3 — Flink 2.1 runtime image
 # ─────────────────────────────────────────────────────────────────────────────
-FROM flink:2.1-java17
+FROM flink:2.2-java17@sha256:354a4828677d6e8a7dbd1e8fceaf803ba0a603c6c841808807bb00cec88c5b9e
 
-# Activate the bundled S3-Hadoop filesystem plugin.
+# Activate the bundled S3-Hadoop filesystem plugin
 RUN mkdir -p /opt/flink/plugins/s3-fs-hadoop \
     && cp /opt/flink/opt/flink-s3-fs-hadoop-*.jar \
           /opt/flink/plugins/s3-fs-hadoop/
 
-# Hadoop classes for Paimon (provides org.apache.hadoop.conf.Configuration etc.)
-COPY --from=paimon-builder /hadoop/flink-shaded-hadoop-2-uber-2.8.3-10.0.jar /opt/flink/lib/
+# Hadoop classes (required by Paimon — Flink 2.x no longer bundles Hadoop)
+COPY --from=paimon-builder /hadoop/ /opt/flink/lib/
 
-# Paimon Flink connector
+# Paimon Flink connector (fat jar)
 COPY --from=paimon-builder /paimon-flink.jar /opt/flink/lib/paimon-flink.jar
 
-# Cluster + S3A + SQL Gateway configuration
+# Vortex format + JNI + runtime deps (Arrow, Protobuf, etc.)
+COPY --from=paimon-builder /vortex-libs/ /opt/flink/lib/
+
+# Flink configuration
 COPY flink/config.yaml /opt/flink/conf/config.yaml
 
-# SQL init script for Paimon catalog
+# SQL init script
 COPY flink/init.sql /opt/flink/init.sql
 
 # SQL Gateway startup wrapper
-COPY flink/sql-gateway-start.sh /sql-gateway-start.sh
-RUN chmod +x /sql-gateway-start.sh
+COPY --chmod=755 flink/sql-gateway-start.sh /sql-gateway-start.sh
