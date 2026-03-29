@@ -1,28 +1,5 @@
 name: paimon-flink
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Prerequisites:
-#   git submodule add git@github.com:kochkozharov/paimon.git paimon
-#   git -C paimon checkout release-1.3.1
-#
-# Build (first time ~10-15 min for paimon-flink-2.1 module):
-#   docker compose build
-#
-# Start:
-#   docker compose up -d
-#
-# SQL Client (connects to SQL Gateway, catalog auto-initialized):
-#   docker exec -it sql-gateway \
-#     /opt/flink/bin/sql-client.sh gateway \
-#       --endpoint http://localhost:8083 \
-#       --init /opt/flink/init.sql
-#
-# URLs:
-#   Flink Web UI  → http://localhost:8081
-#   MinIO Console → http://localhost:9001  (minioadmin / minioadmin)
-#   SQL Gateway   → http://localhost:8083
-# ─────────────────────────────────────────────────────────────────────────────
-
 x-flink-build: &flink-build
   build:
     context: .
@@ -30,14 +7,13 @@ x-flink-build: &flink-build
 
 services:
 
-  # ── Object storage ──────────────────────────────────────────────────────────
   minio:
     image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     container_name: minio
     hostname: minio
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # Web console
+      - "9000:9000"
+      - "9001:9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -50,7 +26,6 @@ services:
       timeout: 5s
       retries: 12
 
-  # One-shot: create the S3 bucket that Paimon will use as warehouse root
   minio-init:
     image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     container_name: minio-init
@@ -65,13 +40,12 @@ services:
       "
     restart: "no"
 
-  # ── Flink cluster ───────────────────────────────────────────────────────────
   jobmanager:
     <<: *flink-build
     container_name: jobmanager
     hostname: jobmanager
     ports:
-      - "8081:8081"   # Web UI
+      - "8081:8081"
     environment:
       JOB_MANAGER_RPC_ADDRESS: jobmanager
     command: jobmanager
@@ -100,9 +74,6 @@ services:
       jobmanager:
         condition: service_healthy
 
-  # ── Flink SQL Gateway ───────────────────────────────────────────────────────
-  # Accepts SQL over REST (port 8083) and submits jobs to the cluster above.
-  # The SQL Client inside this container is the recommended way to write queries.
   sql-gateway:
     <<: *flink-build
     container_name: sql-gateway
@@ -111,8 +82,6 @@ services:
       - "8083:8083"
     environment:
       JOB_MANAGER_RPC_ADDRESS: jobmanager
-    # Use our wrapper instead of docker-entrypoint.sh so the gateway starts
-    # without being misidentified as jobmanager/taskmanager.
     entrypoint: /sql-gateway-start.sh
     depends_on:
       jobmanager:

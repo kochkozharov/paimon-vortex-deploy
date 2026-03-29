@@ -1,8 +1,3 @@
--- ─────────────────────────────────────────────────────────────────────────────
--- Paimon catalog backed by MinIO (S3-compatible storage, s3a:// scheme)
--- Run automatically via: sql-client.sh ... --init /opt/flink/init.sql
--- ─────────────────────────────────────────────────────────────────────────────
-
 CREATE CATALOG IF NOT EXISTS paimon_catalog WITH (
   'type'      = 'paimon',
   'warehouse' = 's3a://warehouse/paimon'
@@ -13,7 +8,6 @@ USE CATALOG paimon_catalog;
 CREATE DATABASE IF NOT EXISTS demo;
 USE demo;
 
--- Events stored in Parquet format (default)
 CREATE TABLE IF NOT EXISTS events_parquet (
   user_id    BIGINT,
   event_time TIMESTAMP(3),
@@ -25,7 +19,6 @@ CREATE TABLE IF NOT EXISTS events_parquet (
   'file.format'  = 'parquet'
 );
 
--- Same schema stored in Vortex format
 CREATE TABLE IF NOT EXISTS events_vortex (
   user_id    BIGINT,
   event_time TIMESTAMP(3),
@@ -37,7 +30,6 @@ CREATE TABLE IF NOT EXISTS events_vortex (
   'file.format'  = 'vortex'
 );
 
--- Temporary datagen source (100 rows, bounded)
 CREATE TEMPORARY TABLE datagen_source (
   user_id    BIGINT,
   event_time TIMESTAMP(3),
