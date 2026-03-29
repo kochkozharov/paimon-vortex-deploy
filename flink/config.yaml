@@ -24,6 +24,11 @@ sql-gateway.endpoint.rest.port: 8083
 # Target cluster for SQL Gateway job submission
 execution.target: remote
 
+# ── Checkpointing (required for Paimon to commit data) ───────────────────────
+execution.checkpointing.interval: 10s
+execution.checkpointing.mode: EXACTLY_ONCE
+state.checkpoints.dir: s3a://warehouse/checkpoints
+
 # ── S3A filesystem → MinIO ────────────────────────────────────────────────────
 # Paimon warehouse uses s3a://warehouse/paimon
 # flink-s3-fs-hadoop plugin wraps Hadoop S3A and is loaded from plugins/.

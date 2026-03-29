@@ -2,52 +2,49 @@
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 1 — Build Apache Paimon from the submodule source
-#
-# Prerequisites before `docker compose build`:
-#   git submodule add git@github.com:kochkozharov/paimon.git paimon
-#   git -C paimon checkout release-1.3.1
-#   # or after cloning:
-#   git submodule update --init
 # ─────────────────────────────────────────────────────────────────────────────
 FROM maven:3.9-eclipse-temurin-17 AS paimon-builder
 
 WORKDIR /build
 COPY paimon/ .
 
-# Build only the Flink 2.1 connector and its transitive dependencies.
-# -Pflink2 activates the flink2 profile (paimon-flink-2.1 is NOT in the default reactor).
-# BuildKit cache mount keeps ~/.m2 between rebuilds.
+# Build the Flink 2.1 connector + its transitive deps.
+# -Pflink2 activates the flink2 profile (module is NOT in the default reactor).
 RUN --mount=type=cache,target=/root/.m2/repository \
     mvn clean package -DskipTests --no-transfer-progress \
         -Pflink2 \
         -pl paimon-flink/paimon-flink-2.1 --also-make \
         -Dmaven.repo.local=/root/.m2/repository
 
-# Stage the connector jar to a fixed path for the next stage.
-# Pick the largest jar from target/ (the shaded/bundled one).
+# Stage the connector jar to a fixed path.
 RUN JAR=$(find /build/paimon-flink/paimon-flink-2.1/target \
-              -maxdepth 1 -name "paimon-flink-*.jar" \
-              ! -name "*sources*" ! -name "*javadoc*" \
-              ! -name "*tests*"   ! -name "original-*" \
-          | xargs -I{} sh -c 'printf "%s %s\n" "$(wc -c < {})" "{}"' \
-          | sort -n | tail -1 | awk '{print $2}') \
+              -maxdepth 1 -name "paimon-flink-*.jar") \
     && echo "==> Paimon Flink jar: $JAR ($(du -h "$JAR" | cut -f1))" \
     && cp "$JAR" /paimon-flink.jar
 
+# Paimon requires Hadoop classes (marked 'provided' in its POM).
+# Flink 2.x does not bundle Hadoop, so download the pre-bundled shaded jar
+# via Maven (guaranteed network — it already fetched paimon deps above).
+RUN --mount=type=cache,target=/root/.m2/repository \
+    mvn dependency:copy \
+        -Dartifact=org.apache.flink:flink-shaded-hadoop-2-uber:2.8.3-10.0 \
+        -DoutputDirectory=/hadoop \
+        --no-transfer-progress \
+        -Dmaven.repo.local=/root/.m2/repository \
+    && ls -lh /hadoop/
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 2 — Flink 2.1 with S3 plugin + Paimon connector
+# Stage 2 — Flink 2.1 with S3 plugin + Paimon connector + Hadoop
 # ─────────────────────────────────────────────────────────────────────────────
 FROM flink:2.1-java17
 
 # Activate the bundled S3-Hadoop filesystem plugin.
-# Flink ships it in opt/ but it must live in plugins/ to be loaded at runtime.
 RUN mkdir -p /opt/flink/plugins/s3-fs-hadoop \
     && cp /opt/flink/opt/flink-s3-fs-hadoop-*.jar \
           /opt/flink/plugins/s3-fs-hadoop/
 
-# Paimon requires Hadoop classes (marked 'provided' in its POM).
-# Flink 2.x no longer bundles Hadoop — add the pre-bundled shaded jar.
-ADD https://repo1.maven.org/maven2/org/apache/flink/flink-shaded-hadoop-2-uber/2.8.3-10.0/flink-shaded-hadoop-2-uber-2.8.3-10.0.jar /opt/flink/lib/
+# Hadoop classes for Paimon (provides org.apache.hadoop.conf.Configuration etc.)
+COPY --from=paimon-builder /hadoop/flink-shaded-hadoop-2-uber-2.8.3-10.0.jar /opt/flink/lib/
 
 # Paimon Flink connector
 COPY --from=paimon-builder /paimon-flink.jar /opt/flink/lib/paimon-flink.jar
@@ -55,9 +52,9 @@ COPY --from=paimon-builder /paimon-flink.jar /opt/flink/lib/paimon-flink.jar
 # Cluster + S3A + SQL Gateway configuration
 COPY flink/config.yaml /opt/flink/conf/config.yaml
 
-# Convenience: SQL init script for Paimon catalog (used by sql-client --init)
+# SQL init script for Paimon catalog
 COPY flink/init.sql /opt/flink/init.sql
 
-# Startup wrapper for SQL Gateway
+# SQL Gateway startup wrapper
 COPY flink/sql-gateway-start.sh /sql-gateway-start.sh
 RUN chmod +x /sql-gateway-start.sh
