@@ -1,0 +1,12 @@
+# git history
+.git
+paimon/.git
+
+# IDE / OS
+.idea
+.DS_Store
+**/.DS_Store
+
+# docker artifacts
+Dockerfile*
+docker-compose*

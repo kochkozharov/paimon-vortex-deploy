@@ -1,0 +1,3 @@
+[submodule "paimon"]
+	path = paimon
+	url = git@github.com:kochkozharov/paimon.git
