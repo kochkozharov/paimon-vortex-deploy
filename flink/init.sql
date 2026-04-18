@@ -5,8 +5,8 @@ CREATE CATALOG IF NOT EXISTS paimon_catalog WITH (
 
 USE CATALOG paimon_catalog;
 
-CREATE DATABASE IF NOT EXISTS demo3;
-USE demo3;
+CREATE DATABASE IF NOT EXISTS demo4;
+USE demo4;
 
 CREATE TABLE IF NOT EXISTS events_parquet (
   user_id    BIGINT,

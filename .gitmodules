@@ -1,6 +1,7 @@
 [submodule "paimon"]
 	path = paimon
 	url = git@github.com:kochkozharov/paimon.git
+	branch = vortex-on-1.4.0-rc1
 [submodule "vortex"]
 	path = vortex
 	url = https://github.com/spiraldb/vortex.git
