@@ -2,41 +2,58 @@
 
 FROM rust:1.94 AS vortex-builder
 
+# Кросс-компилируем .so на x86_64-unknown-linux-gnu с glibc 2.28 через
+# cargo-zigbuild. Контейнер при этом запускается нативно под платформу
+# билд-хоста (на mac arm64 — linux/arm64), без qemu-эмуляции — так быстрее
+# в разы, чем --platform=linux/amd64. Zig подкладывает sysroot с нужной
+# версией glibc, итоговый .so работает на нодах с glibc >= 2.28.
+ARG ZIG_VERSION=0.13.0
+ARG RUST_TARGET=x86_64-unknown-linux-gnu
+ARG GLIBC_VERSION=2.28
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        clang libclang-dev \
+        clang libclang-dev curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+RUN BUILD_ARCH=$(uname -m) \
+    && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${BUILD_ARCH}-${ZIG_VERSION}.tar.xz" \
+       | tar -xJ -C /opt \
+    && ln -s "/opt/zig-linux-${BUILD_ARCH}-${ZIG_VERSION}/zig" /usr/local/bin/zig \
+    && zig version
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo install --locked cargo-zigbuild
 
 WORKDIR /vortex
 COPY vortex/ .
 
+# rustup target add должен выполняться из /vortex, чтобы rustup прочитал
+# rust-toolchain.toml и поставил std для запиненного тулчейна (иначе std
+# ставится для дефолтного, а билд падает с "can't find crate for core").
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/vortex/target \
-    cargo build --package vortex-jni --release \
-    && cp target/release/libvortex_jni.so /libvortex_jni.so
+    rustup target add ${RUST_TARGET} \
+    && cargo zigbuild --package vortex-jni --release \
+        --target ${RUST_TARGET}.${GLIBC_VERSION} \
+    && cp target/${RUST_TARGET}/release/libvortex_jni.so /libvortex_jni.so \
+    && echo "=== GLIBC versions required by libvortex_jni.so ===" \
+    && objdump -T /libvortex_jni.so | grep -oE 'GLIBC_[0-9.]+' | sort -u
 
 FROM maven:3.9.9-eclipse-temurin-17 AS paimon-builder
+
+# Java-jar-ы платформонезависимые, но нативка внутри paimon-vortex-jni
+# должна лечь в папку, соответствующую таргет-платформе нод кластера.
+# Хардкодим linux-amd64, т.к. кросс-компиляция выше делается именно под него.
+ARG NATIVE_DIR=linux-amd64
 
 WORKDIR /build
 COPY paimon/ .
 
-RUN ARCH=$(uname -m) \
-    && case "$ARCH" in \
-         x86_64)  NATIVE_DIR="linux-amd64" ;; \
-         aarch64) NATIVE_DIR="linux-aarch64" ;; \
-         *)       echo "Unsupported arch: $ARCH"; exit 1 ;; \
-       esac \
-    && mkdir -p paimon-vortex/paimon-vortex-jni/src/main/resources/native/$NATIVE_DIR \
-    && echo "Native dir: $NATIVE_DIR"
-
 COPY --from=vortex-builder /libvortex_jni.so /tmp/libvortex_jni.so
-RUN ARCH=$(uname -m) \
-    && case "$ARCH" in \
-         x86_64)  NATIVE_DIR="linux-amd64" ;; \
-         aarch64) NATIVE_DIR="linux-aarch64" ;; \
-       esac \
+RUN mkdir -p paimon-vortex/paimon-vortex-jni/src/main/resources/native/${NATIVE_DIR} \
     && cp /tmp/libvortex_jni.so \
-       paimon-vortex/paimon-vortex-jni/src/main/resources/native/$NATIVE_DIR/libvortex_jni.so \
-    && echo "Copied to native/$NATIVE_DIR/"
+       paimon-vortex/paimon-vortex-jni/src/main/resources/native/${NATIVE_DIR}/libvortex_jni.so \
+    && echo "Copied to native/${NATIVE_DIR}/"
 
 RUN --mount=type=cache,target=/root/.m2/repository \
     mvn clean install -DskipTests --no-transfer-progress \
