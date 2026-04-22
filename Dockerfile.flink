@@ -1,20 +1,35 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.94 AS vortex-builder
+# ─────────────────────────────────────────────────────────────
+# Мульти-архитектурная сборка.
+#
+#   BUILDPLATFORM  — хост (где крутится builder).
+#   TARGETPLATFORM — куда компилируем итоговый образ.
+#     = linux/amd64 или linux/arm64.
+#
+# На ARM mac для локального docker-compose TARGETPLATFORM
+# автоматически = linux/arm64 (host-native), всё собирается нативно.
+#
+# Для кластерной сборки jar-ов amd64 Makefile прогоняет buildx с
+# `--platform=linux/amd64`, Rust кросс-компилируется через zigbuild.
+#
+# Java-jar-ы платформенно-независимы, но нативка libvortex_jni.so и
+# базовый flink-образ — per-arch. Rust triple и resources/native/...
+# папка выбираются из TARGETARCH.
+# ─────────────────────────────────────────────────────────────
 
-# Кросс-компилируем .so на x86_64-unknown-linux-gnu с glibc 2.28 через
-# cargo-zigbuild. Контейнер при этом запускается нативно под платформу
-# билд-хоста (на mac arm64 — linux/arm64), без qemu-эмуляции — так быстрее
-# в разы, чем --platform=linux/amd64. Zig подкладывает sysroot с нужной
-# версией glibc, итоговый .so работает на нодах с glibc >= 2.28.
+FROM --platform=$BUILDPLATFORM rust:1.94 AS vortex-builder
+
+ARG TARGETARCH
 ARG ZIG_VERSION=0.13.0
-ARG RUST_TARGET=x86_64-unknown-linux-gnu
 ARG GLIBC_VERSION=2.28
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         clang libclang-dev curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
+# Устанавливаем zig под АРХИТЕКТУРУ БИЛДА (buildplatform). Он сам
+# умеет кросс-компилить в любой target через --target.
 RUN BUILD_ARCH=$(uname -m) \
     && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${BUILD_ARCH}-${ZIG_VERSION}.tar.xz" \
        | tar -xJ -C /opt \
@@ -24,33 +39,41 @@ RUN BUILD_ARCH=$(uname -m) \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo install --locked cargo-zigbuild
 
+# Рассчитываем Rust triple и имя native dir из TARGETARCH.
+RUN case "${TARGETARCH}" in \
+      amd64) echo x86_64-unknown-linux-gnu  > /rust_target ; echo linux-amd64   > /native_dir ;; \
+      arm64) echo aarch64-unknown-linux-gnu > /rust_target ; echo linux-aarch64 > /native_dir ;; \
+      *)     echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2 ; exit 1 ;; \
+    esac
+
 WORKDIR /vortex
 COPY vortex/ .
 
 # rustup target add должен выполняться из /vortex, чтобы rustup прочитал
-# rust-toolchain.toml и поставил std для запиненного тулчейна (иначе std
-# ставится для дефолтного, а билд падает с "can't find crate for core").
+# rust-toolchain.toml и поставил std для запиненного тулчейна.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/vortex/target \
-    rustup target add ${RUST_TARGET} \
+    RUST_TARGET=$(cat /rust_target) \
+    && rustup target add ${RUST_TARGET} \
     && cargo zigbuild --package vortex-jni --release \
         --target ${RUST_TARGET}.${GLIBC_VERSION} \
     && cp target/${RUST_TARGET}/release/libvortex_jni.so /libvortex_jni.so \
     && echo "=== GLIBC versions required by libvortex_jni.so ===" \
     && objdump -T /libvortex_jni.so | grep -oE 'GLIBC_[0-9.]+' | sort -u
 
-FROM maven:3.9.9-eclipse-temurin-17 AS paimon-builder
-
-# Java-jar-ы платформонезависимые, но нативка внутри paimon-vortex-jni
-# должна лечь в папку, соответствующую таргет-платформе нод кластера.
-# Хардкодим linux-amd64, т.к. кросс-компиляция выше делается именно под него.
-ARG NATIVE_DIR=linux-amd64
+# ─────────────────────────────────────────────────────────────
+# Maven-сборка paimon-jar-ов. Тоже на BUILDPLATFORM — Java
+# bytecode платформенно-независим.
+# ─────────────────────────────────────────────────────────────
+FROM --platform=$BUILDPLATFORM maven:3.9.9-eclipse-temurin-17 AS paimon-builder
 
 WORKDIR /build
 COPY paimon/ .
 
 COPY --from=vortex-builder /libvortex_jni.so /tmp/libvortex_jni.so
-RUN mkdir -p paimon-vortex/paimon-vortex-jni/src/main/resources/native/${NATIVE_DIR} \
+COPY --from=vortex-builder /native_dir /tmp/native_dir
+RUN NATIVE_DIR=$(cat /tmp/native_dir) \
+    && mkdir -p paimon-vortex/paimon-vortex-jni/src/main/resources/native/${NATIVE_DIR} \
     && cp /tmp/libvortex_jni.so \
        paimon-vortex/paimon-vortex-jni/src/main/resources/native/${NATIVE_DIR}/libvortex_jni.so \
     && echo "Copied to native/${NATIVE_DIR}/"
@@ -86,7 +109,11 @@ RUN --mount=type=cache,target=/root/.m2/repository \
         -Dmaven.repo.local=/root/.m2/repository \
     && ls -lh /hadoop/
 
-FROM flink:2.2-java17@sha256:354a4828677d6e8a7dbd1e8fceaf803ba0a603c6c841808807bb00cec88c5b9e
+# ─────────────────────────────────────────────────────────────
+# Финальный flink-образ под TARGETPLATFORM (multi-arch).
+# Без digest-pin — buildx подтянет amd64 или arm64 автоматически.
+# ─────────────────────────────────────────────────────────────
+FROM flink:2.2-java17
 
 RUN mkdir -p /opt/flink/plugins/s3-fs-hadoop \
     && cp /opt/flink/opt/flink-s3-fs-hadoop-*.jar \

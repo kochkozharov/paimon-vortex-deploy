@@ -69,6 +69,9 @@ services:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_EC2_METADATA_DISABLED: "true"
+      # object_store (rust crate в vortex-jni) по умолчанию требует HTTPS.
+      # MinIO у нас по http — разрешаем явно.
+      AWS_ALLOW_HTTP: "true"
     command: taskmanager
     depends_on:
       jobmanager:
