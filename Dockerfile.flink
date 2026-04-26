@@ -81,7 +81,7 @@ RUN NATIVE_DIR=$(cat /tmp/native_dir) \
 RUN --mount=type=cache,target=/root/.m2/repository \
     mvn clean install -DskipTests --no-transfer-progress \
         -Pflink2 \
-        -pl paimon-flink/paimon-flink-2.2,paimon-vortex/paimon-vortex-format \
+        -pl paimon-flink/paimon-flink-2.2,paimon-vortex/paimon-vortex-format,paimon-lance \
         --also-make \
         -Dmaven.repo.local=/root/.m2/repository
 
@@ -100,6 +100,20 @@ RUN --mount=type=cache,target=/root/.m2/repository \
     && cp paimon-vortex/paimon-vortex-jni/target/paimon-vortex-jni-1.4.0.jar /vortex-libs/ \
     && cp paimon-arrow/target/paimon-arrow-1.4.0.jar /vortex-libs/ \
     && ls -lh /vortex-libs/
+
+# ── Lance: native lib уже в lance-core.jar (Maven central), компилировать не надо. ──
+# Транзитивные deps по комментарию paimon-lance/pom.xml: lance-core, questdb/jar-jni,
+# flatbuffers-java, jackson-*, eclipse-collections, arrow-* (paimon-arrow уже в /vortex-libs).
+RUN --mount=type=cache,target=/root/.m2/repository \
+    mvn dependency:copy-dependencies \
+        -pl paimon-lance \
+        --no-transfer-progress \
+        -DoutputDirectory=/lance-libs \
+        -DincludeScope=runtime \
+        -DexcludeGroupIds=org.apache.paimon \
+        -Dmaven.repo.local=/root/.m2/repository \
+    && cp paimon-lance/target/paimon-lance-1.4.0.jar /lance-libs/ \
+    && ls -lh /lance-libs/
 
 RUN --mount=type=cache,target=/root/.m2/repository \
     mvn dependency:copy \
@@ -122,6 +136,7 @@ RUN mkdir -p /opt/flink/plugins/s3-fs-hadoop \
 COPY --from=paimon-builder /hadoop/ /opt/flink/lib/
 COPY --from=paimon-builder /paimon-flink.jar /opt/flink/lib/paimon-flink.jar
 COPY --from=paimon-builder /vortex-libs/ /opt/flink/lib/
+COPY --from=paimon-builder /lance-libs/ /opt/flink/lib/
 COPY flink/config.yaml /opt/flink/conf/config.yaml
 COPY flink/init.sql /opt/flink/init.sql
 COPY --chmod=755 flink/sql-gateway-start.sh /sql-gateway-start.sh

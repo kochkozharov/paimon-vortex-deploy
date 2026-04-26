@@ -35,6 +35,7 @@ help:
 	@echo "Output layout ($(OUT_DIR)/):"
 	@echo "  paimon-flink.jar   shaded paimon-flink-2.2-1.4.0.jar"
 	@echo "  vortex-libs/       paimon-vortex-* + paimon-arrow + runtime deps"
+	@echo "  lance-libs/        paimon-lance-1.4.0 + lance-core + jar-jni + flatbuffers + jackson"
 	@echo "  hadoop/            flink-shaded-hadoop-2-uber"
 
 jars:
@@ -51,11 +52,12 @@ jars:
 	@cid=$$(docker create --platform=$(PLATFORM) $(IMAGE)) && \
 		docker cp $$cid:/paimon-flink.jar $(OUT_DIR)/ && \
 		docker cp $$cid:/vortex-libs/. $(OUT_DIR)/vortex-libs/ && \
+		docker cp $$cid:/lance-libs/. $(OUT_DIR)/lance-libs/ && \
 		docker cp $$cid:/hadoop/. $(OUT_DIR)/hadoop/ && \
 		docker rm $$cid > /dev/null
 	@echo ""
 	@echo "Jars exported to $(OUT_DIR)/:"
-	@ls -lh $(OUT_DIR)/paimon-flink.jar $(OUT_DIR)/vortex-libs/ $(OUT_DIR)/hadoop/
+	@ls -lh $(OUT_DIR)/paimon-flink.jar $(OUT_DIR)/vortex-libs/ $(OUT_DIR)/lance-libs/ $(OUT_DIR)/hadoop/
 
 compose-up:
 	docker compose up -d --build
