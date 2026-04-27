@@ -15,7 +15,16 @@ sql-gateway.endpoint.rest.port: 8083
 
 execution.target: remote
 
-env.java.opts.taskmanager: "--add-opens=java.base/java.nio=ALL-UNNAMED"
+# Hadoop-aws S3A через commons-logging держит classloader user-code в static field.
+# При concurrent jobs (streaming writer + batch reader на одном TM) старый user
+# classloader закрывается, новый job падает на "Trying to access closed classloader".
+# Отключаем strict-check — утечка в hadoop-aws library, не наш баг.
+classloader.check-leaked-classloader: false
+
+# Не рестартить упавший job — для бенчмарка лучше явный fail чем infinite retry-loop.
+restart-strategy.type: none
+
+env.java.opts.all: "--add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED"
 
 execution.checkpointing.interval: 10s
 execution.checkpointing.mode: EXACTLY_ONCE
